@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MAX=100
+CACHE_TTL=300
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pirate"
+WATCH="${WATCH_DIR:-$HOME/.rtorrent/watch}"
+TRACKERS=(
+  udp://tracker.opentrackr.org:1337/announce
+  udp://tracker.coppersurfer.tk:6969/announce
+  udp://tracker.leechers-paradise.org:6969/announce
+  udp://9.rarbg.to:2710/announce
+  udp://p4p.arenabg.com:1337/announce
+  udp://tracker.torrent.eu.org:451/announce
+  udp://open.stealth.si:80/announce
+  udp://tracker.tiny-vps.com:6969/announce
+)
+
+query="${*:?Usage: pirate <search>}"
+cache_key=$(echo "$query" | md5sum | cut -d' ' -f1)
+cache_file="$CACHE_DIR/$cache_key"
+
+data=""
+if [[ -f "$cache_file" ]]; then
+  age=$(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0)))
+  if [[ $age -lt $CACHE_TTL ]]; then
+    data=$(cat "$cache_file")
+  fi
+fi
+
+if [[ -z "$data" ]]; then
+  printf "Fetching results... " >&2
+  tmpf=$(mktemp)
+  curl -sf --get "https://apibay.org/q.php" \
+    --data-urlencode "q=$query" \
+    --data "cat=0" \
+    --max-time 60 > "$tmpf" 2>/dev/null &
+  curl_pid=$!
+  while kill -0 "$curl_pid" 2>/dev/null; do
+    printf "\rFetching results... ⠋" >&2; sleep 0.1
+    printf "\rFetching results... ⠙" >&2; sleep 0.1
+    printf "\rFetching results... ⠹" >&2; sleep 0.1
+    printf "\rFetching results... ⠸" >&2; sleep 0.1
+    printf "\rFetching results... ⠼" >&2; sleep 0.1
+    printf "\rFetching results... ⠴" >&2; sleep 0.1
+    printf "\rFetching results... ⠦" >&2; sleep 0.1
+    printf "\rFetching results... ⠧" >&2; sleep 0.1
+    printf "\rFetching results... ⠇" >&2; sleep 0.1
+    printf "\rFetching results... ⠏" >&2; sleep 0.1
+  done
+  wait "$curl_pid" && printf "\rFetching results... done.   \n" >&2 || {
+    printf "\rFetching results... failed.   \n" >&2
+    rm -f "$tmpf"
+    exit 1
+  }
+  data=$(cat "$tmpf")
+  rm -f "$tmpf"
+  mkdir -p "$CACHE_DIR"
+  echo "$data" > "$cache_file"
+fi
+
+first=$(echo "$data" | jq -r '.[0].name')
+[[ "$first" == "No results returned" ]] && echo "No results." && exit 0
+
+tsv=$(echo "$data" | jq -r '
+  sort_by(.seeders | tonumber) | reverse | .[:'"$MAX"'] |
+  .[] | [.name, .status, (.size|tonumber|.+0.5|floor|tostring), .seeders, .leechers, .info_hash, .username, .added] | @tsv
+')
+
+details_file=$(mktemp)
+preview_script=$(mktemp)
+trap 'rm -f "$details_file" "$preview_script"' EXIT
+
+cat > "$preview_script" << 'PREVIEW'
+#!/usr/bin/env bash
+hash=$(echo "$1" | awk '{print $NF}')
+grep "^$hash|" "$PIRATE_DETAILS" | while IFS='|' read -r h name status size seeds leechers username added; do
+  echo "Name:   $name"
+  echo "Status: $status"
+  echo "Size:   $(numfmt --to=iec --format='%.1f' "$size" 2>/dev/null || echo "${size}B")"
+  echo "Seeds:  $seeds"
+  echo "Leech:  $leechers"
+  echo "User:   $username"
+  echo "Added:  $(date -d "@$added" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "$added")"
+done
+PREVIEW
+chmod +x "$preview_script"
+export PIRATE_DETAILS="$details_file"
+
+declare -A names
+formatted=""
+while IFS=$'\t' read -r name status rawsize seeds leechers hash username added; do
+  names["$hash"]="$name"
+  echo "$hash|$name|$status|$rawsize|$seeds|$leechers|$username|$added" >> "$details_file"
+  size=$(numfmt --to=iec --format='%.1f' "$rawsize" 2>/dev/null || echo "${rawsize}B")
+  formatted+=$(printf "%-60.60s %-9s %8s  %5s seeds  %5s leechers  %s\n" "$name" "$status" "$size" "$seeds" "$leechers" "$hash")
+  formatted+=$'\n'
+done <<< "$tsv"
+
+selected=$(echo "$formatted" |
+  fzf --multi --reverse --no-sort \
+      --header="Tab to select, Enter to confirm" \
+      --preview-window=down:40% \
+      --preview="$preview_script {}" |
+  awk '{print $NF}')
+
+[[ -z "$selected" ]] && echo "Nothing selected." && exit 0
+
+mkdir -p "$WATCH"
+count=0
+while IFS= read -r hash; do
+  magnet="magnet:?xt=urn:btih:$(echo -n "$hash" | jq -sRr @uri)&dn=$(echo -n "${names[$hash]}" | jq -sRr @uri)"
+  for tr in "${TRACKERS[@]}"; do
+    magnet+="&tr=$(echo -n "$tr" | jq -sRr @uri)"
+  done
+  echo "d10:magnet-uri${#magnet}:${magnet}e" > "$WATCH/$hash.torrent"
+  ((++count))
+done <<< "$selected"
+
+echo "Added $count torrent(s) to $WATCH."
