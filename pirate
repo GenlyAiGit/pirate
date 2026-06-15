@@ -8,12 +8,10 @@ WATCH="${WATCH_DIR:-$HOME/.rtorrent/watch}"
 TRACKERS=(
   udp://tracker.opentrackr.org:1337/announce
   udp://tracker.coppersurfer.tk:6969/announce
-  udp://tracker.leechers-paradise.org:6969/announce
   udp://9.rarbg.to:2710/announce
   udp://p4p.arenabg.com:1337/announce
   udp://tracker.torrent.eu.org:451/announce
   udp://open.stealth.si:80/announce
-  udp://tracker.tiny-vps.com:6969/announce
 )
 
 query="${*:?Usage: pirate <search>}"
